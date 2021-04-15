@@ -1,0 +1,370 @@
+---
+title: A data scraping tool for stock tickers
+subtitle: Using stackoverflow and medium as sources
+author:
+  - Faes E., Antwerp Management School
+fontsize: 12pt
+date: '*April 13 2021*'
+output: 
+    html_document:
+        toc: true
+        toc_depth: 3
+        number_sections: false
+        theme: united
+        highlight: tango
+    pdf_document: default
+    bookdown::pdf_document2:
+      latex_engine: lualatex
+      toc: false
+    df_print: paged
+header-includes:
+  - \usepackage{titling}
+  - \pretitle{\begin{center}
+    \includegraphics[width=2in,height=2in]{avatar.jpg}\LARGE\\}
+  - \posttitle{\end{center}}
+  - \usepackage{pdflscape}
+bibliography: references.bib
+---
+
+Dear all, I hope you are all well. This document is written in the morning, as I am strarting to become very productive as an early riser. We only have the AMS master's thesis left in these last 10 weeks. I was just interested to do something with R to compute a nice dashboard that I can just use for every new html table I import with stock tickers in it. Also a bit motivated by my fellow students at AMS. First, Hendrik ("HP") Van der Merwe who is trying to do the exact same thing for South African stocks. Also Filippo Pratesi, one of my colleagues where I am writing the master dissertation with, who is building a script to minimize the bear beta in a portfolio of ETFs.
+## Set-up
+
+```{r packages, include=F}
+list.of.packages <- c("rvest", "ggplot2", "quantmod","tidyverse","ftplottools", "highcharter", "tidyr", "tidyquant", "kableExtra")
+new.packages <- list.of.packages[
+    !(list.of.packages %in% installed.packages()[,"Package"])
+    ]
+if(length(new.packages)) install.packages(new.packages)
+suppressMessages(suppressWarnings(lapply(list.of.packages, library, 
+                                         character.only = TRUE)))
+```
+
+### Data
+
+For example [this url](https://www.dividendmax.com/market-index-constituents/bel-20) is a table with all BEL20 stocks in it.
+
+```{r data, echo=F}
+url <- "https://www.dividendmax.com/market-index-constituents/bel-20"
+population <- url %>%
+  xml2::read_html() %>%
+  html_nodes(xpath='//*[@id="content"]/div/div/div/div[2]/div/table') %>%
+  html_table()
+population %>% kbl(format='html',
+      caption = "Web scraped table",
+      label = 'tab1',
+      booktabs = T,
+      position = "h!",
+      digits = 3) %>%
+  kable_classic(full_width = F) %>%
+  footnote(general = "This table is retrieved from dividendmax.com")
+```
+
+\newpage
+
+### Getsymbols
+However, if you look at column Ticker in the table Belgian stocks are ofcourse somewhat different on Yahoo Finance: we have to add .BR (Brussels Stock Exchange) to each word. Also there are some Dutch stocks in there which we will have to add .AS for. We can easily do this in R with an if statement within a loop.
+
+```{r manipulation, echo=F}
+population2 <- do.call(rbind.data.frame, population)
+for(i in 1:nrow(population2)) {
+    if(population2$Exchange[i] == "Euronext Brussels") {
+        population2$Ticker[i] <- paste0(population2$Ticker[i], ".BR")
+    }
+    if(population2$Exchange[i] == "Euronext Amsterdam") {
+        population2$Ticker[i] <- paste0(population2$Ticker[i], ".AS")
+    }
+}
+stock_list <- population2$Ticker
+```
+
+Used a code from "Using getSymbols to Load Financial Data (R)" by Carrie Lo on medium.com to download all prices from April 2016 (5 years in the past) at once with progress bar in long format.
+```{r include=F}
+start_date <- Sys.Date()-365*5 #5 previous years
+end_date <- Sys.Date()
+master_df <- NULL
+for (idx in seq(length(stock_list))){
+  stock_index = stock_list[idx]
+  getSymbols(stock_index, verbose = TRUE, src = "yahoo", 
+             from=start_date,to=end_date)
+  temp_df = as.data.frame(get(stock_index)) 
+  #add to.weekly or to.monthly before get to change
+  temp_df$Date = row.names(temp_df)
+  temp_df$index = stock_index
+  row.names(temp_df) = NULL
+  colnames(temp_df) = c("Open", "High", "Low", "Close", 
+                        "Volume", "Adjusted", "Date", "Index")
+  temp_df = temp_df[c("Date", "Index", "Open", "High", 
+                      "Low", "Close", "Volume", "Adjusted")]
+  master_df = rbind(master_df, temp_df)
+}
+colnames(master_df) <-c("Date", "Symbol", "Open", "High", 
+                      "Low", "Close", "Volume", "Adjusted")
+```
+
+```{r echo=F}
+master_df %>% head(5) %>% kbl(format='html',
+      caption = "Yahoo finance API datatable (first 5 rows)",
+      label = 'tab2',
+      booktabs = T,
+      position = "h!",
+      digits = 3) %>%
+  kable_classic(full_width = F) %>%
+  footnote(general = "This data is directly retrieved from Yahoo Finance")
+```
+
+
+If we want the sector and company later on, we definitely have to merge the yahoo finance table with the scraped table
+```{r echo=F}
+selection <- data.frame(Symbol = population2$Ticker, Company = population2$Company, Sector =population2$Sector)
+result <- merge(master_df,selection, by = "Symbol")
+result %>% head(5) %>% kbl(format='html',
+      caption = "Merged table (first 5 rows)",
+      label = 'tab2',
+      booktabs = T,
+      position = "h!",
+      digits = 3) %>%
+  kable_classic(full_width = F) 
+```
+
+### Log-returns visual 
+If we want to want to make some nice visualizations like the evolution of the time series (log returns) or Prices. 
+```{r echo=F}
+result %<>% group_by(Symbol) %>% 
+    mutate(dayreturn = Adjusted/lag(Adjusted)-1) %>% 
+    ungroup()
+result <- result %>% 
+    na.omit(.)
+result2 <- result %>% 
+    group_by(Symbol) %>% 
+    mutate(cumret = cumprod(1+dayreturn))
+result2 <- result2 %>%  
+    mutate(Date = as.Date(Date, format = "%Y-%m-%d"))
+results2 <- ungroup(result2)
+results3 <- results2 %>% group_by(Symbol) %>% mutate(logret = log(Adjusted) - log(lag(Adjusted))) %>% na.omit()
+
+log_returns_xts <- results3 %>% select(Date, Symbol, logret) %>% spread(key = Symbol, value = logret)
+log_returns_xts <- xts(log_returns_xts[,-1], order.by = log_returns_xts$Date)
+ 
+Hchc <- highchart(type = "stock") %>%
+    hc_title(text = "Log returns")  %>% 
+    hc_add_theme(hc_theme_flat()) %>% 
+    hc_navigator(enabled = FALSE) %>% 
+    hc_scrollbar(enabled = FALSE) %>% 
+    hc_exporting(enabled = TRUE) %>% 
+    hc_legend(enabled = TRUE)
+
+for (i in 1:ncol(log_returns_xts)) {
+       Hchc <- Hchc %>% hc_add_series(data = log_returns_xts[,i], name = stock_list[i])}
+Hchc
+    
+```
+
+
+\newpage
+\begin{landscape} 
+Let's say we want to plot this? Let's use the Financial times theme to make it somewhat nicer looking at the same time. However this might not be super clear right now. So let's do a facet wrap instead in the next figure
+```{r fig.align='center',echo=F}
+ggplot(result2, mapping=aes(x=Date,y=cumret, color=Symbol))+geom_line() + ft_theme() + xlab("Year") + ylab("Wealth index") + ggtitle("Growth of 1 dollar invested in the stock")
+```
+\end{landscape} 
+\newpage
+
+\begin{landscape} 
+```{r fig.align='center',fig.width = 27/2.54, fig.height = 19/2.54, echo=F}
+result2 %>%
+  group_by(Symbol) %>%
+  arrange(desc(Date)) %>%
+  ggplot(aes(x = Date, y = Adjusted))+
+  geom_line() +
+  facet_wrap(~Company, ncol = 4, scales = "free") +
+  theme_tq() +
+  ggtitle("Stock Prices since April 2016") + xlab("Year") +
+  ylab("Adjusted Price") 
+```
+\end{landscape}
+\newpage
+
+## Some other nice Visualizations 
+```{r include=F}
+computeMVstats <- function(R) { # R = matrix-like object containing returns
+    mu <- colMeans(R) #average returns
+    Sigma <- cov(R) #covariance matrix
+    SigmaInv <- solve(Sigma) #inverse function using solve
+    ones <- rep(1, length(mu))
+    # the MV constants:
+    a <- as.vector(t(mu) %*% SigmaInv %*% mu)
+    b <- as.vector(t(mu) %*% SigmaInv %*% ones)
+    c <- as.vector(t(ones) %*% SigmaInv %*% ones)
+    
+    # the Tangency Portfolio:
+    w_TP <- SigmaInv %*% mu / b #weights
+    mu_TP <- a/b #average return
+    var_TP <- a/(b^2) #variance
+    sh_TP <- mu_TP/sqrt(var_TP) #Sharpe ratio
+    
+    # the Minimum Variance Portfolio:
+    w_MVP <- SigmaInv %*% ones / c
+    mu_MVP <- b/c
+    var_MVP <- 1/c
+    sh_MVP <- mu_MVP/sqrt(var_MVP)
+    
+    # join together the stats of both MV portfolios:
+    mv_stat <- matrix(data = c(mu_TP, sqrt(var_TP), sh_TP,  
+                               #expected return, vol 
+                               #, sharpe tangency portfolio
+                               mu_MVP, sqrt(var_MVP), sh_MVP), 
+                      #exactly the same 
+                      #for MVP
+                      nrow = 3)
+    rownames(mv_stat) <- c("mean", "std", "Sharpe") #row names
+    colnames(mv_stat) <- c("TP", "MVP") #first column and second column
+    print(mv_stat)
+    # join the portfolio weights for both portfolios:
+    mv_weights <- cbind(w_TP, w_MVP)
+    colnames(mv_weights) <- c("TP", "MVP")
+    rownames(mv_weights) <- names(R) #names of the assets
+    
+    #Prepare function output as a named list:which is the one big one
+    MVstats <- list(assets = names(R),
+                    mu = mu, sigma = Sigma, #expected returns assets, cov matrix
+                    stats = mv_stat,  #statistics
+                    weights = mv_weights, #weights
+                    mv_const = c(a = a, b = b, c = c)) #also need the constants
+    
+    return(MVstats)
+}
+```
+
+### Prices visual
+We of course want to do this on daily/monthly returns, simple returns! not log. Here they are also visualized using Highchart.
+
+```{r echo=F}
+R <- results2 %>% select(Date, Symbol, dayreturn) %>% spread(key = Symbol, value = dayreturn)
+R_xts <- xts(R[,-1], order.by = R$Date)
+prices <- result2 %>% select(Date, Symbol, Adjusted) %>% spread(key = Symbol, value = Adjusted) 
+prices_xts <- xts(prices[,-1], order.by = prices$Date)
+
+Hchc <- highchart(type = "stock") %>%
+    hc_title(text = "Stock prices")  %>% 
+    hc_add_theme(hc_theme_flat()) %>% 
+    hc_navigator(enabled = FALSE) %>% 
+    hc_scrollbar(enabled = FALSE) %>% 
+    hc_exporting(enabled = TRUE) %>% 
+    hc_legend(enabled = TRUE)
+
+for (i in 1:ncol(prices_xts)) {
+       Hchc <- Hchc %>% hc_add_series(data = prices_xts[,i], name = stock_list[i])}
+Hchc
+
+prices_xts_monthly <- prices_xts[endpoints(prices_xts, on="months"),stock_list]
+
+
+R_xts2 <- na.omit(Return.calculate(prices_xts_monthly))
+
+R_xtslatest <- R_xts["2020-04-01/"]
+R_xtslatest2 <- R_xts2["2020-04-01/"]
+
+assets <- stock_list
+# mv <- computeMVstats(R_xtslatest[,stock_list]) #daily
+mv2 <- computeMVstats(R_xts2[,stock_list]) #daily
+```
+
+###  Visualized gross returns
+What we can see from this graph that the stocks from ING and Bekaert would have earned you the most money, by more than doubling your investments if you would have invested exactly 1 year ago that is.
+```{r echo=F}
+cumR_xtslatest <- cumprod(1+R_xtslatest)
+ones <- matrix(rep(1,ncol(1+R_xtslatest)), nrow = 1, ncol = ncol(R_xtslatest))
+date0 <- xts(ones, min(index(R_xtslatest)) %m+% days(-1))
+colnames(date0) <- stock_list
+cumR_xtslatest <- rbind(as.data.frame(date0),as.data.frame(cumR_xtslatest))
+cumR_xtslatest <- as.xts(cumR_xtslatest, order_by = as.Date(index(cumR_xtslatest)))
+
+cumR_xtslatest2 <- cumprod(1+R_xtslatest2)
+datetest <- min(index(R_xtslatest)) %m+% months(-1)
+date1 <- as.xts(ones, datetest)
+colnames(date1) <- stock_list
+cumR_xtslatest2 <-rbind(as.data.frame(date1),as.data.frame(cumR_xtslatest2))
+cumR_xtslatest2 <- as.xts(cumR_xtslatest2, order_by = as.Date(index(cumR_xtslatest2)))
+
+
+Hchc <- highchart(type = "stock") %>%
+    hc_title(text = "Gross Daily Stock returns since COVID")  %>%
+    hc_add_theme(hc_theme_flat()) %>% 
+    hc_navigator(enabled = FALSE) %>% 
+    hc_scrollbar(enabled = FALSE) %>% 
+    hc_exporting(enabled = TRUE) %>% 
+    hc_legend(enabled = TRUE)
+
+for (i in 1:ncol(prices_xts)) {
+       Hchc <- Hchc %>% hc_add_series(data = cumR_xtslatest[,i], name = stock_list[i])}
+Hchc
+
+Hchc <- highchart(type = "stock") %>%
+    hc_title(text = "Gross Monthly Stock returns since COVID")  %>%
+    hc_add_theme(hc_theme_flat()) %>% 
+    hc_navigator(enabled = FALSE) %>% 
+    hc_scrollbar(enabled = FALSE) %>% 
+    hc_exporting(enabled = TRUE) %>% 
+    hc_legend(enabled = TRUE)
+
+for (i in 1:ncol(prices_xts)) {
+       Hchc <- Hchc %>% hc_add_series(data = cumR_xtslatest2[,i], name = stock_list[i])}
+Hchc
+```
+
+## Portfolio construction
+How will we allocate our positions? Let's first look at Harry M. Markowitz: mean-variance portfolio (least risk), tangency portfolio (max risk-return trade-off) and the efficient frontier. I know it's a theory that is far from optimal for portfolio construction, but let's do it anyways
+
+[![Markowitz](markowitz-13420-portrait-medium.jpeg "Mean variance portfolio allocation"){width="200"}](https://www.nobelprize.org/prizes/economic-sciences/1990/markowitz/biographical/)
+
+Let's look at the Mean variance graph by prof. dr. [Annaert](https://www.antwerpmanagementschool.be/nl/faculty/jan-annaert). 
+
+```{r echo=F}
+#Function to plot the frontier
+plot_mv_frontier <- function(mv, levmax_TP = 2, new_plot = TRUE,
+                             add_CAL = TRUE) {
+    weights <- mv$weights
+    mu <- mv$mu
+    sigma <- mv$sigma
+    stds <- sqrt(diag(sigma))
+    stat_p <- mv$stats
+    
+    w <- seq(0, levmax_TP, length.out = 100)
+    w_mv <- sapply(w, function(x) (1-x)*weights[,"MVP"] + x*weights[,"TP"])
+    
+    i <- seq_along(w)
+    mu_mv <- sapply(i, function(x) t(mu) %*% w_mv[,x])
+    sigma_mv <- sqrt(sapply(i, function(x) t(w_mv[,x]) %*% sigma %*% w_mv[,x]))
+    
+    max_std <- max(c(stds,sigma_mv)) * 1.1 #set axis to get a nice graph
+    max_mu <- max(c(mu,mu_mv)) * 1.1
+    
+    if(new_plot) plot(x = c(0, sigma_mv, max_std),
+                      y = c(-0.01, mu_mv, max_mu),
+                      type = 'n', xlab = "return volatility",
+                      ylab = "expected return")
+    lines(x = sigma_mv, y = mu_mv, type = 'l', col = "blue")
+    
+    if(new_plot) points(x = stds, y = mu, col = "red")
+    if(new_plot) text(x = stds, y = mu, labels = assets, 
+                      pos = 4, offset = 0.5, cex = 0.75, col = "darkgreen")
+    points(x = stat_p[2,], y = stat_p[1,],
+           col = "black")
+    text(x = stat_p[2,], y = stat_p[1,], labels = colnames(stat_p),
+         col = "black", pos = 2, offset = 0.5, cex = 0.75)
+    grid()
+    if(add_CAL) abline(a = 0, b = stat_p[3,1], lty = "dashed", col = "grey") #takes as b the sharpe of the TP
+}
+# plot_mv_frontier(mv)  #daily
+plot_mv_frontier(mv2) #monthly
+```
+
+## Data source
+
+BEL 20 Constituents. (2021). Dividendmax.com. <https://www.dividendmax.com/market-index-constituents/bel-20> ‌
+
+## Works used
+
+R-bloggers. (2015). R-Bloggers. <https://www.r-bloggers.com/author/cory-nissen/> ‌
+
+Using rvest to Scrape an HTML Table \| R-bloggers. (2015, January 8). R-Bloggers. <https://www.r-bloggers.com/2015/01/using-rvest-to-scrape-an-html-table/> ‌
